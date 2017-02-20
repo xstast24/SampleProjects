@@ -1,0 +1,11 @@
+ISA 2016 - Monitoring DHCP communication
+
+AUTHOR
+Filip Stastny, xstast24
+
+INSTALLATION REQUIREMENTS
+scapy.noarch (EPEL repository)
+python-ipaddress.noarch (EPEL repository)
+
+MAKEFILE
+There is no Makefile needed. No "make" command should be needed.

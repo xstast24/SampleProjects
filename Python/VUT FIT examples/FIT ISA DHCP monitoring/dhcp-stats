@@ -1,0 +1,390 @@
+#!/usr/bin/python
+
+# ISA 2016 projekt
+# Monitoring DHCP komunikace
+# autor: Filip Stastny, xstast24
+
+
+import re
+import os
+import sched
+import signal
+import sys
+import time
+import threading
+from operator import attrgetter
+import ipaddress as ip
+import logging
+logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
+from scapy.all import *
+
+
+subnets = []  # list of all given subnet objects
+addresses = {}  # all allocated addresses 'address':[addr_expiration, [list of subnets the address is part of]]
+lock = threading.Lock()  # lock serving to unique increment and decrement of subnet statistics
+lock2 = threading.Lock()  # lock serving to unique increment and decrement of subnet statistics
+
+run = True  # variable to determine if second thread should run or quit
+log_interval = None  # -c parameter
+timer_log = None  # used to reference Timer to save statistics with -c parameter
+
+pcap_file_name = None  # -r parameter
+last_packet_time = None  # parse pcap file as it was real-time monitor
+time_diff = None  # parse pcap file as it was real-time monitor
+
+killsig_acquired = False  # if kill signal sent from terminal, exit porgram
+
+
+def help_print():
+    """
+    Print help message and exit program.
+    """
+    print("DHCP monitoring\n"
+          "Pro detaily pouziti vyuzijte manualovou stranku programu.\n"
+          "-h - vypise napovedu a ukonci program, nelze kombinovat s ostatnimi parametry\n"
+          "--help - vypise napovedu a ukonci program, nelze kombinovat s ostatnimi parametry\n"
+          "<ip-prefix1> [<ip-prefixN>] - IPv4 adresy a masky podsiti, pro ktere maji byt tvoreny statistiky, napr. 192.168.1.0/24\n"
+          "-c <int> - logovani CSV statistik do souboru kazdych int sekund\n"
+          "-r <file> - vytvori statistiky z pcap souboru\n")
+
+
+def exit_with_code_and_message(code_, message=None):
+    """
+    Print optional error message to stderr and exit program with given error code.
+    :param code_: int, error code
+    1 - incorrect script parameter(s)
+    6 - function not implemented
+    42 - unexpected error
+    :param message: string, error message
+    """
+    if message:
+        sys.stderr.write(message)
+        sys.stderr.write("\nPro napovedu o pouziti spustte skript s parametrem -h nebo --help.\n")
+    sys.exit(code_)
+
+
+class Subnet:
+    string_form = None  # string prefix
+    subnet = None  # IPv4 network object
+    mask = None  # int decimal mask
+    max_hosts = None  # int number of max hosts in subnet
+    utilization = None  # float utilization of addresses (0=0%, 1=100%)
+    allocated_addresses = None  # int number of allocated addresses in subnet
+
+    def __init__(self, ip_prefix):
+        """
+        Create object for each subnet given.
+        :param ip_prefix: string ip-prefix eg. "192.168.1.0/24"
+        """
+        self.string_form = ip_prefix
+        self.subnet = ip.ip_network(unicode(ip_prefix))
+        self.mask = int(ip_prefix.split('/')[1])
+        self.max_hosts = self.subnet.num_addresses - (2 if self.mask <= 30 else 0)
+        self.utilization = 0.0
+        self.allocated_addresses = 0
+
+    def add_address(self):
+        """
+        Increase address counter, update utilization statistics.
+        """
+        if self.allocated_addresses < self.max_hosts:
+            with lock2:
+                self.allocated_addresses += 1
+
+            self.utilization = float(self.allocated_addresses) / self.max_hosts
+
+    def remove_address(self):
+        """
+        Decrease address counter, update utilization statistics.
+        """
+        with lock2:
+            if self.allocated_addresses > 0:
+                self.allocated_addresses -= 1
+
+            self.utilization = float(self.allocated_addresses) / self.max_hosts
+
+
+def parse_params():
+    """
+    Parse script parameters and save needed values to global variables (well... not nice, but fully object oriented script would need couple of hours to remake this one, which I have not.
+    """
+    global subnets, log_interval, pcap_file_name, last_packet_time, time_diff
+
+    params = sys.argv[1:]  # first param is the script name
+    skip_next_param = False
+    i = -1
+    for param in params:
+        i += 1
+        if skip_next_param:
+            skip_next_param = False
+            continue
+
+        # help param
+        if param == '--help' or param == '-h':
+            help_print()
+            if len(params) == 1:
+                exit_with_code_and_message(0)
+            else:
+                exit_with_code_and_message(1, "Parametry --help nebo -h nelze kombinovat s ostatnimi parametry.")
+        elif re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2}$', param):  # ip_prefix params
+            for subnet_ in subnets:
+                if param == subnet_.string_form:
+                    exit_with_code_and_message(1, "Duplicitni ip-prefix: {0}, prosim zadejte kazdy ip-prefix pouze jednou.".format(param))
+
+            try:
+                subnets.append(Subnet(param))
+            except:  # multiple exceptions could have been raised when trying to create ip_network object
+                exit_with_code_and_message(1, "Chybne zadany prefix: {0}".format(param))
+        # logging interval param
+        elif param == '-c':
+            if log_interval:
+                exit_with_code_and_message(1, "Duplicitni vyskyt parametru -c.")
+
+            try:
+                log_interval = int(params[i+1])
+                if log_interval < 1:
+                    exit_with_code_and_message(1, "Parametr -c vyzaduje kladnou celociselnou hodnotu.")
+                skip_next_param = True
+            except Exception:  # ValueError + IndexError
+                exit_with_code_and_message(1, "Parameter -c vyzaduje ciselnou hodnotu.")
+        # pcap file name param
+        elif param == '-r':
+            if pcap_file_name:
+                exit_with_code_and_message(1, "Duplicitni vyskyt parametru -r.")
+
+            try:
+                pcap_file_name = params[i+1]
+                last_packet_time = 0
+                skip_next_param = True
+            except IndexError:
+                exit_with_code_and_message(1, "Parameter -r vyzaduje nazev souboru. ")
+
+            try:
+                with open(pcap_file_name, mode='r') as test_open:  # test if file exists
+                    pass
+            except IOError:
+                exit_with_code_and_message(2, "Soubor <{0}> dany parametrem -r nelze otevrit pro cteni.".format(pcap_file_name))
+        else:
+            exit_with_code_and_message(1, "Chybne zadane parametry - neznamy parametr.")
+
+    if not subnets:
+        exit_with_code_and_message(1, "Chybejici ip-prefix(y) pro statistiku.")
+
+    subnets = sorted(subnets, key=attrgetter('mask'))  # sort subnets from the lowest mask value to the highest one
+
+
+def remove_expired(address_string):
+    try:
+        subs = addresses[address_string][1]
+        del addresses[address_string]
+        for subnet_ in subs:
+            subnet_.remove_address()
+
+        print_statistics()
+    except Exception:  # address has been already released, this should not happen, except case is just to be sure
+        pass
+
+
+def parse_ack_packet(packet_):
+    """
+    Add address with its expiration Timer to statistics, increase counters for affected subnets.
+    :param packet_: sniffed bootp/DHCP packet
+    """
+    global subnets
+    global addresses
+    address_str = packet_[BOOTP].yiaddr
+    address_obj = ip.ip_address(unicode(packet_[BOOTP].yiaddr))
+
+    # get address lease time if given
+    lease_time = None
+    for option in packet_[DHCP].options:
+        if 'lease_time' in option:
+            lease_time = option[1]
+
+    if lease_time:
+        expiration_timer = threading.Timer(lease_time, remove_expired, (address_str,))
+        expiration_timer.start()
+    else:
+        expiration_timer = None
+
+    try:  # try to update expiration time of address
+        if addresses[address_str][0] is not None:  # stop possible Timer to remove after expiration
+            addresses[address_str][0].cancel()
+
+        addresses[address_str][0] = expiration_timer  # add new Timer
+    except Exception:
+        affected_subnets = []
+        for subnet_ in subnets:
+            if address_obj in subnet_.subnet:
+                subnet_.add_address()
+                affected_subnets.append(subnet_)
+
+        addresses[address_str] = [expiration_timer, affected_subnets]
+
+
+def parse_release_packet(packet_):
+    """
+    Remove address from statistics, decrease counters for affected subnets. Does nothing if the released address was not previously logged.
+    :param packet_: sniffed bootp/DHCP packet
+    """
+    global addresses
+    address_str = packet_[BOOTP].ciaddr
+
+    try:
+        if addresses[address_str][0] is not None:  # stop possible Timer to remove after expiration
+            addresses[address_str][0].cancel()
+
+        with lock2:
+            affected_subnets = addresses[address_str][1]
+            del addresses[address_str]
+
+        for subnet_ in affected_subnets:
+            subnet_.remove_address()
+    except KeyError:  # if address has not been logged previously there is no need to delete it
+        pass
+
+
+def filter_packets(packet_):
+    """
+    Pass sniffed packet to ACK or RELEASE packet parsing function.
+    :param packet_: sniffed bootp/DHCP packet
+    """
+    global last_packet_time, time_diff
+    packet_type = None
+    try:
+        for option in packet_[DHCP].options:
+            if 'message-type' in option:
+                packet_type = option[1]
+    except Exception:
+        return None
+
+    if packet_type == 5:
+        if pcap_file_name:  # pcap file relative time problem counting
+            packet_time = packet_.time
+            current_time = time.time()
+            if not time_diff:  # count time difference between two epoques - pcap creation and now
+                time_diff = current_time - packet_time
+
+            if current_time < time_diff+packet_time:  # packet time not passed yet, wait for it to come
+                try:
+                    time.sleep(time_diff+packet_time-current_time)
+                except IOError:  # packet time somehow already passed, so do not wait and proceed, this case should not really happen
+                    pass
+
+        parse_ack_packet(packet_)
+        print_statistics()
+    elif packet_type == 7:
+        if pcap_file_name:  # pcap file relative time problem counting
+            packet_time = packet_.time
+            current_time = time.time()
+            if not time_diff:  # count time difference between two epoques - pcap creation and now
+                time_diff = current_time - packet_time
+
+            if current_time < time_diff+packet_time:  # packet time not passed yet, wait for it to come
+                try:
+                    time.sleep(time_diff+packet_time-current_time)
+                except IOError:  # packet time somehow already passed, so do not wait and proceed, this case should not really happen
+                    pass
+
+        parse_release_packet(packet_)
+        print_statistics()
+
+
+def print_statistics():
+    """
+    Write stats to stdout every time new adress is acquired or used adress is released.
+    """
+    global subnets
+    stats = "IP Prefix             Max hosts       Allocated addresses      Utilization\n"
+    for subnet_ in subnets:
+        pad1 = ' ' * (22 - len(subnet_.string_form))
+        pad2 = ' ' * (16 - len(str(subnet_.max_hosts)))
+        pad3 = ' ' * (25 - len(str(subnet_.allocated_addresses)))
+        stats += subnet_.string_form + pad1 + str(subnet_.max_hosts) + pad2 + str(subnet_.allocated_addresses) + pad3 + str(round(subnet_.utilization * 100, 2)) + '%\n'
+
+    os.system('clear')
+    print stats
+
+
+def write_statistics(interval):
+    """
+    Write stats to file in interval given by -c parameter.
+    :param interval: integer, interval in seconds how often stats should be logged to file
+    """
+    global timer_log
+    timer_log = threading.Timer(interval, write_statistics, (interval,))
+    timer_log.start()
+
+    stats = ''
+    for subnet_ in subnets:
+        stats += str(subnet_.allocated_addresses) + '(' + str(round(subnet_.utilization * 100, 2)) + '%),'
+
+    with open('log', mode='a') as log_file:
+        log_file.write(stats[:-1] + '\n')  # remove redundant comma
+
+
+def handler(signum, frame):
+    """
+    Handle system signals to kill process - exits all threads.
+    """
+    global run, timer_log, addresses, killsig_acquired
+    run = False  # stop sniffing and removing expired lease times thread
+    killsig_acquired = True
+    if timer_log:  # stop logging to file with param -c
+        timer_log.cancel()
+
+    for address_ in addresses.values():  # kill all release timers
+        if address_[0]:
+            address_[0].cancel()
+
+
+def stop_sniffing(packet_):
+    """
+    When run is set to False, stop sniffing thread.
+    """
+    global run
+    return not run  # True stops sniffing
+
+
+# RUN program
+parse_params()
+
+# handle system kill commands - exit program and stop all threads
+signal.signal(signal.SIGTERM, handler)
+signal.signal(signal.SIGINT, handler)
+
+# if logging to file is enabled
+if log_interval:
+    header = ''
+    for subnet in subnets:
+        header += subnet.string_form + '(' + str(subnet.max_hosts) + '),'
+
+    with open('log', mode='w') as log_file_:  # write header to log file
+        log_file_.write(header[:-1] + '\n')  # remove redundant comma
+
+    write_statistics(log_interval)
+
+try:
+    if pcap_file_name:
+        sniff(offline=pcap_file_name, store=0, filter="udp and (port 67 or port 68)", prn=filter_packets, stop_filter=stop_sniffing)
+        if not killsig_acquired:
+            killsig_acquired = True
+            run = False
+            if timer_log:
+                timer_log.cancel()
+
+            for address in addresses.values():  # kill all release timers
+                if address[0] is not None:
+                    address[0].cancel()
+    else:
+        sniff(store=0, filter="udp and (port 67 or port 68)", prn=filter_packets, stop_filter=stop_sniffing)
+except:
+    run = False
+    if timer_log:
+        timer_log.cancel()
+    if not killsig_acquired:
+        for address in addresses.values():  # kill all release timers
+            if address[0]:
+                address[0].cancel()
+
+sys.exit(0)

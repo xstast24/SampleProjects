@@ -1,0 +1,37 @@
+.TH DHCP-STATS 1
+
+.SH NAME
+dhcp-stats \- monitor DHCP communication and make usage statistics
+
+.SH SYNOPSIS
+.B dhcp-stats
+[\fB\-c\fR \fIfile-log-interval\fR]
+[\fB\-r\fR \fIpcap-file\fR]
+\fIip-prefix \fR...
+
+.SH DESCRIPTION
+.B dhcp-stats
+monitors DHCP communication and creates statistics of leased IP addresses for given IP prefix(es). Monitors real-time communication or communication from .pcap file if specified by \fB-r\fR parameter. Prints statistics to stdout if IP address is acquired or released. Logs statistics to file if enabled by \fB-c\fR parameter.
+
+.SH OPTIONS
+.TP
+.BR \-c\ <file-log-interval>\fR
+Enables logging to file. More information in \fBLOGGING\fR section.
+.TP
+.BR \-r\ <pcap_file>\fR
+Replaces real-time DHCP monitoring with .pcap simulated real-time monitoring of .pcap packets - in time order they were originally captured. <pcap-file> must be a valid name of .pcap file or a valid path to .pcap file.
+.TP
+.BR \fIip-prefix\fR\ ...
+A single mandatory IP prefix followed by optional number of IP prefixes. Each IP prefix will be listed in output statistics/log with information: max-hosts-number, allocated-addresses-count, utilization-percentage.
+
+.SH LOGGING
+Enabled by \fB-c\fR parameter. File named 'log' is created (or truncated if already exists) in a script folder. <file-log-interval> specifies interval in seconds how often is logged to the file, must be positive integer.
+Log format is CSV separated by commas ",". Header row lists all given ip-prefixes in format "ip-prefix(max-hosts-number)". One additional row is added every specified interval, columns have format "allocated-addresses-count(utilization-percentage)".
+
+.SH EXAMPLES
+.TP
+\fBdhcp-stats\ \fI192.168.1.0/24\fR
+Starts real-time monitoring DHCP communication and prints statistics to stdout if anything changes in 192.168.1.0/24 ip pool (address is acquired or released].
+.TP
+\fBdhcp-stats\ -r\fR \fIfile.pcap\f \ \fB-c\fR \fI\5\f \ \fI192.168.1.0/24\ 10.0.0.0/8\fR
+Starts simulation of real-time monitoring packets from given .pcap file, printing statistics to stdout for given ip-prefixes minimally as often as something changes in their IP pool, logging statistics to CSV file every 5 seconds.
