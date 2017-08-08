@@ -1,0 +1,111 @@
+{
+	"signals": [
+		{
+		  "id": 1,
+		  "initHz": 16000000,
+		  "targetHz": 1000000
+		},
+		{
+		  "id": 2,
+		  "initHz": 32000000,
+		  "targetHz": 2000000
+		},
+		{
+		  "id": 3,
+		  "initHz": 4000000,
+		  "targetHz": 16000000
+		}
+	],
+	"devices": [
+		{
+		  	"id": 1,
+		  	"device": "multiplexer",
+		  	"inputs": [
+		    	{
+			      	"id": 1,
+			      	"device": "none",
+		    	},
+		    	{
+			      	"id": 2,
+			      	"device": "divider",
+			      	"modifier": 2
+	    		},
+		    	{
+			      	"id": 3,
+			      	"device": "multiplexer",
+			      	"inputs": [
+				    	{
+					      	"id": 1,
+					      	"device": "none",
+				    	},
+				    	{
+					      	"id": 2,
+					      	"device": "divider",
+					      	"modifier": 2
+			    		},
+				    	{
+					      	"id": 3,
+					      	"device": "divider",
+					      	"modifier": 4
+			    		},
+				    	{
+					      	"id": 4,
+					      	"device": "multiplier",
+					      	"modifier": 2
+			    		},
+				    	{
+					      	"id": 5,
+					      	"device": "multiplier",
+					      	"modifier": 4
+			    		}
+	    			]
+	    		},
+		    	{
+			      	"id": 4,
+			      	"device": "multiplier",
+			      	"modifier": 4
+	    		},
+		    	{
+			      	"id": 5,
+			      	"device": "divider",
+			      	"modifier": 16
+	    		}
+	    	]
+	    },
+	    {
+			"id": 2,
+			"device": "divider",
+			"modifier": 2
+	    },
+	    {
+		  	"id": 3,
+		  	"device": "multiplexer",
+		  	"inputs": [
+		    	{
+			      	"id": 1,
+			      	"device": "none",
+		    	},
+		    	{
+			      	"id": 2,
+			      	"device": "divider",
+			      	"modifier": 2
+	    		},
+		    	{
+			      	"id": 3,
+			      	"device": "divider",
+			      	"modifier": 3
+	    		},
+		    	{
+			      	"id": 4,
+			      	"device": "divider",
+			      	"modifier": 4
+	    		},
+		    	{
+			      	"id": 5,
+			      	"device": "divider",
+			      	"modifier": 5
+	    		}
+	    	]
+	    }
+	]
+}
